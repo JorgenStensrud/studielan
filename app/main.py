@@ -5,7 +5,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, Header, HTTPException, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
@@ -1047,8 +1047,25 @@ async def partial_vurdering(
 
 
 # --- Admin endpoints ---
+# All admin endpoints require X-Admin-Token matching ADMIN_TOKEN env.
+# Defense in depth — Caddy basic_auth was the only gate; this closes the
+# hole if Coolify/Traefik ever routes around Caddy or origin IP is hit
+# directly. ADMIN_TOKEN must be set in env or admin endpoints stay closed.
 
-@app.post("/api/oppdater")
+import os
+import hmac
+
+_ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+
+def require_admin(x_admin_token: str = Header(default="")):
+    if not _ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="admin disabled (ADMIN_TOKEN unset)")
+    if not hmac.compare_digest(x_admin_token, _ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="bad admin token")
+    return True
+
+
+@app.post("/api/oppdater", dependencies=[Depends(require_admin)])
 async def oppdater():
     try:
         rates = await seb.fetch_swap_rates()
@@ -1058,7 +1075,7 @@ async def oppdater():
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
-@app.get("/api/db-dates")
+@app.get("/api/db-dates", dependencies=[Depends(require_admin)])
 async def db_dates():
     """Check what dates exist in bank_rate_estimates."""
     conn = await db.get_db()
@@ -1079,7 +1096,7 @@ async def db_dates():
         await conn.close()
 
 
-@app.post("/api/collect")
+@app.post("/api/collect", dependencies=[Depends(require_admin)])
 async def collect():
     """Manual trigger: collect and store all data (swap + banks + estimates)."""
     try:
@@ -1089,7 +1106,7 @@ async def collect():
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
-@app.post("/api/seed-swap")
+@app.post("/api/seed-swap", dependencies=[Depends(require_admin)])
 async def seed_swap(request: Request):
     """Seed swap rates from JSON payload. Expects: [{"tenor":"3 Yr","rate":4.44,"observed_at":"2026-03-03T00:00:00","source":"cbonds"}]"""
     from app.models import SwapRate
@@ -1111,7 +1128,7 @@ async def seed_swap(request: Request):
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
-@app.post("/api/bootstrap")
+@app.post("/api/bootstrap", dependencies=[Depends(require_admin)])
 async def bootstrap():
     try:
         rates = await cbonds.fetch_history(days_back=365)
@@ -1122,7 +1139,7 @@ async def bootstrap():
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 
-@app.post("/api/bootstrap-banks")
+@app.post("/api/bootstrap-banks", dependencies=[Depends(require_admin)])
 async def bootstrap_banks():
     """Backfill historical bank fastrente data from Finansportalen (Dec 2024+)."""
     try:

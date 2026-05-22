@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -117,6 +118,54 @@ def _estimate_risk(est: EstimatedRate, years: int) -> str:
     if years >= 10:
         score += 1
     return "lav" if score <= 1 else "middels" if score <= 3 else "høy"
+
+
+def _weekly_overrides(weekly_obs_data: dict | None) -> dict[str, tuple[float, float]]:
+    """Map tenor label → (lk_nom, lk_eff) from the current observation month.
+
+    Prefers the ongoing observation period (e.g. mai 2026 → driver of July 2026 fastrente)
+    and falls back to the last completed one. Returns {} when no weekly data is available.
+    """
+    if not weekly_obs_data:
+        return {}
+    obs = weekly_obs_data.get("current_obs") or weekly_obs_data.get("previous_obs")
+    if not obs or not obs.get("has_data"):
+        return {}
+    tenors = obs.get("tenors") or {}
+    out: dict[str, tuple[float, float]] = {}
+    for years, label in ((3, "3 år"), (5, "5 år"), (10, "10 år")):
+        t = tenors.get(years)
+        if not t:
+            continue
+        lk_nom = t.get("lk_nom")
+        lk_eff = t.get("lk_eff")
+        if lk_nom is None or lk_eff is None:
+            continue
+        out[label] = (lk_nom, lk_eff)
+    return out
+
+
+def _apply_weekly_overrides(
+    estimates: list[EstimatedRate],
+    overrides: dict[str, tuple[float, float]],
+) -> list[EstimatedRate]:
+    """Return estimates with estimated_lk/effective swapped for weekly-average values.
+
+    Daily Finansportalen snapshots are too noisy; Lånekassen's next fastrente is set
+    from the 3-week running average per Finanstilsynet methodology. Tenors without a
+    weekly value pass through unchanged.
+    """
+    if not overrides:
+        return estimates
+    out: list[EstimatedRate] = []
+    for e in estimates:
+        if e.tenor in overrides:
+            lk_nom, lk_eff = overrides[e.tenor]
+            diff = round(lk_nom - e.current_lk, 3) if e.current_lk is not None else None
+            out.append(replace(e, estimated_lk=lk_nom, estimated_lk_effective=lk_eff, diff=diff))
+        else:
+            out.append(e)
+    return out
 
 
 def _compute_savings(
@@ -674,11 +723,14 @@ async def _fetch_all_data(
     except Exception as e:
         logger.error(f"Weekly observations failed: {e}")
 
+    # Savings/signal use the 3-week running average per tenor, not the noisy daily snapshot.
+    savings_estimates = _apply_weekly_overrides(estimates, _weekly_overrides(weekly_obs_data))
+
     # Savings (use lk_fixed which has actual fixed rates for comparison)
-    savings = _compute_savings(lk_fixed, loan_amount, estimates) if lk_fixed else []
+    savings = _compute_savings(lk_fixed, loan_amount, savings_estimates) if lk_fixed else []
 
     # Recommendation
-    signal = _recommend(lk_fixed, swap_history, estimates, loan_amount=loan_amount)
+    signal = _recommend(lk_fixed, swap_history, savings_estimates, loan_amount=loan_amount)
 
     # Application window
     cw = current_window()
@@ -720,7 +772,7 @@ async def _fetch_all_data(
         "has_bank_history": has_bank_history,
         "bank_rows": bank_rows,
         "weekly_obs_data": weekly_obs_data,
-        "estimates": estimates,
+        "estimates": savings_estimates,
         "savings": savings,
         "signal": signal,
         "loan_amount": loan_amount,
@@ -918,6 +970,14 @@ async def partial_besparelse(
         products_by_tenor = {}
 
     estimates = finansportalen.estimate_next_lk_rates(products_by_tenor, lk_fixed)
+
+    weekly_obs_data = None
+    try:
+        weekly_obs_data = await get_observations_for_dashboard()
+    except Exception as e:
+        logger.error(f"Weekly observations failed: {e}")
+    estimates = _apply_weekly_overrides(estimates, _weekly_overrides(weekly_obs_data))
+
     savings = _compute_savings(lk_fixed, belop, estimates) if lk_fixed else []
     return _render("partials/besparelse.html",
         request=request, savings=savings, loan_amount=belop,
@@ -956,6 +1016,14 @@ async def partial_vurdering(
         products_by_tenor = {}
 
     estimates = finansportalen.estimate_next_lk_rates(products_by_tenor, lk_fixed)
+
+    weekly_obs_data = None
+    try:
+        weekly_obs_data = await get_observations_for_dashboard()
+    except Exception as e:
+        logger.error(f"Weekly observations failed: {e}")
+    estimates = _apply_weekly_overrides(estimates, _weekly_overrides(weekly_obs_data))
+
     signal = _recommend(lk_fixed, swap_history, estimates, loan_amount=belop)
 
     return _render("partials/vurdering.html",

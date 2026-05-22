@@ -1071,8 +1071,9 @@ async def oppdater():
         rates = await seb.fetch_swap_rates()
         await db.insert_swap_rates(rates)
         return {"status": "ok", "rates_stored": len(rates)}
-    except Exception as e:
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+    except Exception:
+        logger.exception("oppdater failed")
+        return JSONResponse({"status": "error"}, status_code=500)
 
 
 @app.get("/api/db-dates", dependencies=[Depends(require_admin)])
@@ -1102,8 +1103,9 @@ async def collect():
     try:
         results = await collect_daily_snapshot()
         return {"status": "ok", **results}
-    except Exception as e:
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+    except Exception:
+        logger.exception("collect failed")
+        return JSONResponse({"status": "error"}, status_code=500)
 
 
 @app.post("/api/seed-swap", dependencies=[Depends(require_admin)])
@@ -1125,7 +1127,7 @@ async def seed_swap(request: Request):
         return {"status": "ok", "rates_stored": len(rates)}
     except Exception as e:
         logger.error(f"Seed swap failed: {e}")
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+        return JSONResponse({"status": "error"}, status_code=500)
 
 
 @app.post("/api/bootstrap", dependencies=[Depends(require_admin)])
@@ -1136,7 +1138,7 @@ async def bootstrap():
         return {"status": "ok", "rates_stored": len(rates)}
     except Exception as e:
         logger.error(f"Bootstrap failed: {e}")
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+        return JSONResponse({"status": "error"}, status_code=500)
 
 
 @app.post("/api/bootstrap-banks", dependencies=[Depends(require_admin)])
@@ -1163,4 +1165,4 @@ async def bootstrap_banks():
         }
     except Exception as e:
         logger.error(f"Bank bootstrap failed: {e}")
-        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+        return JSONResponse({"status": "error"}, status_code=500)

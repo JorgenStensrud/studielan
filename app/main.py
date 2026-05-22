@@ -99,6 +99,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Studielån Rentekalkulator", lifespan=lifespan)
 
 
+# Legacy host redirect: anyone landing on the Coolify-generated nip.io URL
+# gets 301'd to the canonical stens.app domain. Keeps shared links working
+# while telling crawlers the URL has moved.
+@app.middleware("http")
+async def redirect_legacy_host(request: Request, call_next):
+    host = (request.headers.get("host") or "").lower()
+    if host.startswith("studielan.77-42-36-80.nip.io"):
+        from fastapi.responses import RedirectResponse
+        target = f"https://studielan.stens.app{request.url.path}"
+        if request.url.query:
+            target += f"?{request.url.query}"
+        return RedirectResponse(target, status_code=301)
+    return await call_next(request)
+
+
 # --- Helpers ---
 
 def _estimate_risk(est: EstimatedRate, years: int) -> str:
